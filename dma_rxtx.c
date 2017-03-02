@@ -205,7 +205,12 @@ void *dma_rx(int *pkt_len)
 	//printf("trace :  func : %s line : %u\n",__func__,__LINE__);
 	//printf("waiting for rx dma to complete on channel %d\n",channel);
 	while (engine->regs->completed_desc_count < (DESC_CNT)) {
-		usleep(1);
+	if(!connected_to_guest) {
+			printf("returning from func : %s because of guest disconnection\n",__func__);
+			return;
+		}
+		delay_clock_cycles(3400);
+		//usleep(1);
 	}
 	printf("read() : completed_desc_count = %d\n", engine->regs->completed_desc_count);
 	//for(i=0; i < LENGTH / 4; i++)

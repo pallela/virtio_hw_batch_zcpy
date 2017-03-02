@@ -252,8 +252,8 @@ void * transmit_thread(void *args)
 				tx_used->idx++;
 				wmb();
 
-				eventfd_write(txirqfd, (eventfd_t)1);
-				wmb();
+				//eventfd_write(txirqfd, (eventfd_t)1);
+				//wmb();
 				
 				//printf("packets transmitted %d\n\n",tx_used->idx);
 
