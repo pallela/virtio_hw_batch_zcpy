@@ -18,6 +18,27 @@
 #define SOCKPATH "vhost-user1"
 
 
+static inline __attribute__((always_inline)) uint64_t current_clock_cycles()
+
+{
+        unsigned int eax_reg_rdtsc, edx_reg_rdtsc;
+        unsigned long long int uptime;
+
+        asm volatile  ("rdtsc\n\t"
+                        "mov %%eax, %0\n\t"
+                        "mov %%edx, %1\n\t"
+                        :       "=r" (eax_reg_rdtsc) , "=r" (edx_reg_rdtsc)
+                        :
+                        : "eax" , "edx"
+                        );
+
+
+        uptime =  ((unsigned long long int)edx_reg_rdtsc << 32) | eax_reg_rdtsc;
+        return uptime;
+
+}
+
+
 pcap_t *handle;
 uint64_t guestphyddr_to_vhostvadd(uint64_t gpaddr);
 uint64_t qemuvaddr_to_vhostvadd(uint64_t qaddr);
@@ -86,15 +107,27 @@ sem_t tx_start_wait_sem,rx_start_wait_sem;
 sem_t tx_clean_wait_sem,rx_clean_wait_sem;
 
 
-static unsigned char rx_packet_buff[10*1024];
+//static unsigned char rx_packet_buff[10*1024];
 //static unsigned char tx_packet_buff[10*1024];
-unsigned char *tx_packet_buff;
 
+unsigned char **tx_packet_buff;
+unsigned char **rx_packet_buff;
+
+//uint64_t coherent_tx_hw_addresses[64];
+//uint64_t coherent_rx_hw_addresses[64];
+uint64_t *coherent_tx_hw_addresses;
+uint64_t *coherent_rx_hw_addresses;
+
+unsigned int tx_packet_len[64];
+
+
+#define TX_BURST 0
+#define TX_BATCH_SIZE 10
 
 void * transmit_thread(void *args)
 {
 	uint64_t tx_kick_count;
-	int i;
+	int i,j;
 	uint16_t cur_avail_idx = 0,new_avail_descs = 0;;
 	uint16_t cur_used_idx = 0,rx_desc_num = 0;
 	uint16_t rx_ring_no = 0,temp;
@@ -106,6 +139,7 @@ void * transmit_thread(void *args)
 	struct vring_desc temp_desc;
 	int tx_buff_len = 0;
 	int tx_cleanup_required = 0;
+	uint64_t start_clocks,end_clocks;
 
 
 	printf("starting transmit thread \n");
@@ -135,6 +169,22 @@ void * transmit_thread(void *args)
 			//printf("tx_avail->flags : %04x tx_avail->idx : %04x\n",tx_avail->flags,tx_avail->idx);
 
 			//i = 0;
+
+		#if TX_BURST
+			if(new_avail_descs > TX_BATCH_SIZE) {
+				new_avail_descs = TX_BATCH_SIZE;
+			}
+
+			/*
+			if(new_avail_descs >1) {
+				printf("tx burst : %d\n",new_avail_descs);
+			}
+			*/
+		#endif
+
+			j = 0;
+
+
 			while(new_avail_descs--){
 
 				//printf("packet no : %d\n",packet_no);
@@ -162,7 +212,7 @@ void * transmit_thread(void *args)
 						//print_hex(packet_addr,packet_len);
 						//desc_no = (desc_no + 1)%tx_desc_count;
 						desc_no = tx_desc_base[desc_no].next;
-						memcpy(tx_packet_buff + tx_buff_len,packet_addr,packet_len);
+						memcpy(tx_packet_buff[j] + tx_buff_len,packet_addr,packet_len);
 						tx_buff_len += packet_len;
 					}
 					else {
@@ -172,51 +222,26 @@ void * transmit_thread(void *args)
 						rmb();
 						packet_hdr = (struct virtio_net_hdr_mrg_rxbuf*) packet_addr;
 
-						//printf("num buffers : %02x\n",packet_hdr->num_buffers);
-						//printf("flags : %02x\n",packet_hdr->hdr.flags);
-						//printf("gso_type : %02x\n",packet_hdr->hdr.gso_type);
-						//printf("hdr_len : %02x\n",packet_hdr->hdr.hdr_len);
-						//printf("gso_size : %02x\n",packet_hdr->hdr.gso_size);
-						//printf("csum_start : %02x\n",packet_hdr->hdr.csum_start);
-						//printf("csum_offset : %02x\n",packet_hdr->hdr.csum_offset);
-
-						//print_hex(packet_addr,packet_len);
-						//desc_no = tx_desc_base[desc_no].next;
-						//printf("next desc no may be : %d and next desc data len : %d\n",
-						//desc_no,tx_desc_base[desc_no].len);
-						//pcap_tx(handle,packet_addr+vhost_hlen,packet_len-vhost_hlen);
-
-						memcpy(tx_packet_buff + tx_buff_len,packet_addr,packet_len);
+						memcpy(tx_packet_buff[j] + tx_buff_len,packet_addr,packet_len);
 						tx_buff_len += packet_len;
+						tx_packet_len[j] = tx_buff_len;
 						//print_hex(tx_packet_buff,tx_buff_len);
 						//pcap_tx(handle,tx_packet_buff+vhost_hlen,tx_buff_len-vhost_hlen);
-						dma_tx(tx_packet_buff,tx_buff_len-vhost_hlen,vhost_hlen);
+						#if !TX_BURST
+						//dma_tx(tx_packet_buff,tx_buff_len-vhost_hlen,vhost_hlen);
+						dma_tx(tx_packet_buff[j],tx_buff_len-vhost_hlen,vhost_hlen);
+						#endif
 						TXB +=  tx_buff_len-vhost_hlen;
 						//printf("total sent bytes : %d\n",TXB);
-
-
-
-						#if 0 /* loopback */
-						printf("loopback packet_no : %d\n",packet_no);
-						tmp = (unsigned char *)guestphyddr_to_vhostvadd(rx_desc_base[rx_desc_num].addr);
-						memset(tmp,0,10);
-						tmp = (unsigned char *)guestphyddr_to_vhostvadd(rx_desc_base[rx_desc_num+1].addr);
-						memcpy(tmp,packet_addr,packet_len);
-						rx_used->ring[rx_ring_no].id = rx_desc_num;
-						rx_used->ring[rx_ring_no].len = 10 + packet_len;
-						rx_desc_num = (rx_desc_num+2)%rx_desc_count;
-						rx_ring_no = (rx_ring_no +1)%rx_desc_count;
-						wmb();
-						rx_used->idx++;
-						wmb();
-						eventfd_write(rxirqfd, (eventfd_t)1);
-						wmb();
-						printf("packets received : %d\n",rx_used->idx);
-						#endif
 
 						break;
 					}
 				}
+
+				#endif
+
+				#if TX_BURST
+				j++;
 				#endif
 
 				packet_no++;	
@@ -227,7 +252,8 @@ void * transmit_thread(void *args)
 				tx_used->idx++;
 				wmb();
 
-				//eventfd_write(txirqfd, (eventfd_t)1);
+				eventfd_write(txirqfd, (eventfd_t)1);
+				wmb();
 				
 				//printf("packets transmitted %d\n\n",tx_used->idx);
 
@@ -237,6 +263,16 @@ void * transmit_thread(void *args)
 			}
 			//printf("tx_avail->idx : %d and tx_used->idx: %d\n",tx_avail->idx,tx_used->idx);
 
+			#if TX_BURST
+			//start_clocks = current_clock_cycles();
+				if(j > 0) {
+					//pcap_tx_burst(handle,tx_packet_buff,tx_packet_len,j);
+					dma_tx_burst(coherent_tx_hw_addresses,tx_packet_len,vhost_hlen,j);
+
+				}
+			//end_clocks = current_clock_cycles();
+			//printf("clock : %llu per %d packets\n",(end_clocks-start_clocks),j);
+			#endif
 
 			//tx_used->idx = tx_avail->idx;
 			wmb();
@@ -519,7 +555,11 @@ main(int argc, char **argv)
 	char SOCKPATH_NEW[100];
 	char channel_str[10];
 
+	coherent_tx_hw_addresses = malloc(64*sizeof(uint64_t));;
+	coherent_rx_hw_addresses = malloc(64*sizeof(uint64_t));;
 
+	tx_packet_buff = malloc(64*sizeof(char *));
+	rx_packet_buff = malloc(64*sizeof(char *));
 
 	sem_init(&tx_start_wait_sem,0,0);
 	sem_init(&rx_start_wait_sem,0,0);
