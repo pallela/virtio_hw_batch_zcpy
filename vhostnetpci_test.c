@@ -39,6 +39,15 @@ static inline __attribute__((always_inline)) uint64_t current_clock_cycles()
 }
 
 
+static inline __attribute__((always_inline)) void delay_clock_cycles(uint64_t clock_cycles)
+{
+	register uint64_t start, end;
+	start = current_clock_cycles();
+	do {
+		end = current_clock_cycles();
+	} while ((end - start) < clock_cycles);
+}
+
 pcap_t *handle;
 uint64_t guestphyddr_to_vhostvadd(uint64_t gpaddr);
 uint64_t qemuvaddr_to_vhostvadd(uint64_t qaddr);
@@ -121,14 +130,14 @@ uint64_t *coherent_rx_hw_addresses;
 unsigned int tx_packet_len[64];
 
 
-#define TX_BURST 0
-#define TX_BATCH_SIZE 10
+#define TX_BURST 1
+#define TX_BATCH_SIZE 64
 
 void * transmit_thread(void *args)
 {
 	uint64_t tx_kick_count;
 	int i,j;
-	uint16_t cur_avail_idx = 0,new_avail_descs = 0;;
+	uint16_t cur_avail_idx = 0,new_avail_descs = 0,prev_new_avail_desc;
 	uint16_t cur_used_idx = 0,rx_desc_num = 0;
 	uint16_t rx_ring_no = 0,temp;
 	int packet_no = 0;
@@ -154,9 +163,21 @@ void * transmit_thread(void *args)
 			new_avail_descs = temp - tx_last_avail_idx ;
 
 			if(new_avail_descs == 0) {
-				usleep(100);
+				//usleep(1);
+				delay_clock_cycles(10000);
 				continue;
 			}
+
+			do {
+				prev_new_avail_desc = new_avail_descs;
+				//usleep(1);
+				delay_clock_cycles(60000);
+				temp = tx_avail->idx;
+				cur_avail_idx = tx_last_avail_idx;
+				new_avail_descs = temp - tx_last_avail_idx;
+
+			} while((new_avail_descs > prev_new_avail_desc) && (new_avail_descs <= TX_BATCH_SIZE));
+
 
 			rmb();// read correct values before proceeding
 			tx_last_avail_idx = temp;
@@ -268,6 +289,7 @@ void * transmit_thread(void *args)
 				if(j > 0) {
 					//pcap_tx_burst(handle,tx_packet_buff,tx_packet_len,j);
 					dma_tx_burst(coherent_tx_hw_addresses,tx_packet_len,vhost_hlen,j);
+					/*dma_tx(NULL,tx_packet_len[0],vhost_hlen);*/
 
 				}
 			//end_clocks = current_clock_cycles();

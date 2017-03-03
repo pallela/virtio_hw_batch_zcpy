@@ -342,16 +342,26 @@ struct sg_list
 //#define VHOST_SUPPORTED_FEATURES ((1ULL << VIRTIO_NET_F_MRG_RXBUF) | \
 
 
+#define KERNEL_DRIVER 1
+
+#if KERNEL_DRIVER
 #define VHOST_SUPPORTED_FEATURES ((1ULL << VIRTIO_NET_F_CTRL_VQ) | \
                                 (1ULL << VIRTIO_NET_F_CTRL_RX) | \
 				(1ULL << VIRTIO_F_VERSION_1)   | \
                                 (1ULL << VHOST_F_LOG_ALL)      | \
                                 (1ULL << VHOST_USER_F_PROTOCOL_FEATURES))
 
+#else
+
+#define VHOST_SUPPORTED_FEATURES ((1ULL << VIRTIO_NET_F_CTRL_VQ) | \
+				(1ULL << VIRTIO_NET_F_MRG_RXBUF) | \
+                                (1ULL << VIRTIO_NET_F_CTRL_RX) | \
+				(1ULL << VIRTIO_F_VERSION_1)   | \
+                                (1ULL << VHOST_F_LOG_ALL)      | \
+                                (1ULL << VHOST_USER_F_PROTOCOL_FEATURES))
 
 
-
-
+#endif
 
 #endif
 

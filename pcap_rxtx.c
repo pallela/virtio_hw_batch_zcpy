@@ -54,7 +54,7 @@ uint64_t guestphyddr_to_vhostvadd(uint64_t gpaddr);
 unsigned char mac_address[6] = {0xb8,0x2a,0x72,0xc4,0x26,0x45};
 unsigned char broadcast_mac_address[6] = {0xff,0xff,0xff,0xff,0xff,0xff};
 
-#define RX_BURST 0
+#define RX_BURST 1
 #define RX_BATCH_SIZE 64
 void *pcap_rx_thread(void *arg)
 {

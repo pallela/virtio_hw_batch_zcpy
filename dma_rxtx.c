@@ -212,7 +212,7 @@ void *dma_rx(int *pkt_len)
 		delay_clock_cycles(3400);
 		//usleep(1);
 	}
-	printf("read() : completed_desc_count = %d\n", engine->regs->completed_desc_count);
+	//printf("read() : completed_desc_count = %d\n", engine->regs->completed_desc_count);
 	//for(i=0; i < LENGTH / 4; i++)
 	//      printf("%x", rd_data[i]);
 	//*pkt_len = 0; 
@@ -221,7 +221,7 @@ void *dma_rx(int *pkt_len)
 	//printf("aftr packet received len : %d\n",*pkt_len);
 	xdma_engine_stop(engine);
 	free(engine);
-	return (rd_data);
+	return (rd_data[0]);
 }
 
 
@@ -232,11 +232,13 @@ void *dma_rx(int *pkt_len)
    max_num_packets -> no. of packets received
 */
 
+#define OLD 0
 static struct xdma_engine rx_engine __attribute__((aligned(4096))) ;
 int dma_rx_burst(uint64_t *pkts, unsigned int *max_pkt_len, unsigned int *recv_len, int pkt_offset, int max_num_pkts)
 {
 	int extra_adj = max_num_pkts - 1, next_adj, j = 0, offset, sgdma_offset;
 	int length, i;
+	int delayed;
 	volatile unsigned int read_p, rx_desc_start;
 	unsigned int control, w, timeout;
 	struct xdma_engine *engine;
@@ -244,10 +246,13 @@ int dma_rx_burst(uint64_t *pkts, unsigned int *max_pkt_len, unsigned int *recv_l
 	volatile struct xdma_result *result;
 	time_t start, stop;
 	int new_rx_pkts;
+	uint32_t comp_desc_cnt;
+	uint64_t sclock,eclock,mclock,circles;
 
 	//printf("max_num_pkts : %d\n",max_num_pkts);
 	rx_desc_start = data->rx_queue_dma_addr;
 
+	/*read_p = data->coherent_mem_rx_dma_addr[0];*/
 	#if 0
 
 	engine = malloc(sizeof(struct xdma_engine));
@@ -293,11 +298,10 @@ int dma_rx_burst(uint64_t *pkts, unsigned int *max_pkt_len, unsigned int *recv_l
 			control |= XDMA_DESC_STOPPED_1; /* set to 1 to stop fetching descriptors */
 		else
 			control |= XDMA_DESC_STOPPED_0;
-		//extra_adj = 0;
-		//next_adj = extra_adj - j - 1;
-		//if (next_adj < 1)
-		//	next_adj = 0;
-		//rx_desc_virt[j].control = (control) | ((next_adj << 8) & 0x00003f00);
+		next_adj = extra_adj - j - 1;
+		if (next_adj < 1)
+			next_adj = 0;
+		rx_desc_virt[j].control = (control) | ((next_adj << 8) & 0x00003f00);
 		rx_desc_virt[j].control = (control);
 
 	#if 0
@@ -314,7 +318,7 @@ int dma_rx_burst(uint64_t *pkts, unsigned int *max_pkt_len, unsigned int *recv_l
 
 	}
 
-	result->length = 0;
+	//result->length = 0;
 	engine->regs->completed_desc_count = 0;
 	w = PCI_DMA_L(rx_desc_start);
 	engine->sgdma_regs->first_desc_lo = PCI_DMA_L(rx_desc_start);
@@ -334,8 +338,11 @@ int dma_rx_burst(uint64_t *pkts, unsigned int *max_pkt_len, unsigned int *recv_l
 	//printf("waiting for rx dma to complete on channel %d\n",channel);
 	//printf("control = %x, first_desc_hi = %x, first_desc_lo = %x, first_desc_adjacent = %x\n", engine->regs->control, engine->sgdma_regs->first_desc_hi, engine->sgdma_regs->first_desc_lo, engine->sgdma_regs->first_desc_adjacent);
 	//time(&start);
+circles = 0;
+sclock = current_clock_cycles();
 	new_rx_pkts = 0;
-	while (engine->regs->completed_desc_count < 1) {
+	comp_desc_cnt = engine->regs->completed_desc_count;
+	while (comp_desc_cnt < 1) {
 		//time(&stop);
 		if(!connected_to_guest) {
 			printf("returning from func : %s because of guest disconnection\n",__func__);
@@ -349,38 +356,99 @@ int dma_rx_burst(uint64_t *pkts, unsigned int *max_pkt_len, unsigned int *recv_l
 		*/
 		//usleep(1);
 		delay_clock_cycles(3400);
+		circles++;
+		comp_desc_cnt = engine->regs->completed_desc_count;
 	}
-
+mclock = current_clock_cycles();
+#if OLD
 	new_rx_pkts = engine->regs->completed_desc_count;
 	while(new_rx_pkts < max_num_pkts) {
-		delay_clock_cycles(340);
-		if(engine->regs->completed_desc_count == new_rx_pkts) {
+		delay_clock_cycles(3400);
+		comp_desc_cnt = engine->regs->completed_desc_count;
+		if (comp_desc_cnt == new_rx_pkts) {
 			// no more new packets
 			//printf("no more new pkts, breaking\n");
 			break;
 		}
 		else {
-			new_rx_pkts = engine->regs->completed_desc_count;
+			/*new_rx_pkts = engine->regs->completed_desc_count;*/
+			new_rx_pkts = comp_desc_cnt;
 		}
 	}
 	xdma_engine_stop(engine);
+	//comp_desc_cnt = engine->regs->completed_desc_count;
+#endif
 	/*
 	if(engine->regs->completed_desc_count > 1) {
 	printf("read() : completed_desc_count = %d\n", engine->regs->completed_desc_count);
 	}
 	*/
 
-	for(i=0; i < engine->regs->completed_desc_count; i++) {
+#if OLD
+	for(i=0; i < comp_desc_cnt; i++) {
 		recv_len[i] = result->length;
 		result++;
 	}
+#else
+
+//sclock = current_clock_cycles();
+
+	for(i=0;i<10;i++) {
+		delay_clock_cycles(3400);
+		if((result->status & C2H_WB) == C2H_WB){
+			break;
+		}
+	}
+
+	i = 0;delayed = 0;
+	while(1) {
+		while ((result->status & C2H_WB) == C2H_WB) {
+			delayed = 0;
+			recv_len[i] = result->length;
+			result->status = 0;
+			i++;
+			result++; /*may need ring mgmt -TODO*/
+			if(i == max_num_pkts) { break; }
+		}
+
+		if(!delayed) {
+			delayed= 1;
+			delay_clock_cycles(10000);
+		}
+		else {
+			break;
+		}
+
+	}
+
+	xdma_engine_stop(engine);
+// If we get any new packets in between our previous check and stopping engine
+	for(;i<max_num_pkts;i++) {
+		if((result->status & C2H_WB) == C2H_WB) {
+			recv_len[i] = result->length;
+			result->status = 0;
+			result++;
+		}
+		else {
+			break;
+		}
+	}
+eclock = current_clock_cycles();
+//printf("%d pkts took  p1  : %llu p2 : %llu  cpp : %d circles : %d\n",i,mclock-sclock,eclock-mclock,i == 0 ? 0 : (eclock-mclock)/i,circles);
+	//printf ("rxps: %d\n", i);
+	return i;
+#endif
 	//printf("%x", rd_data[i]);
 	//*pkt_len = 0;	
 	//printf("b4 packet received len : %d\n",*pkt_len);
 	//printf("aftr packet received len : %d\n",*pkt_len);
 	//xdma_engine_stop(engine);
 	//free(engine);
-	return engine->regs->completed_desc_count;
+	/*return engine->regs->completed_desc_count;*/
+	//printf ("rxps: %d\n", comp_desc_cnt);
+eclock = current_clock_cycles();
+//printf("%d pkts took  p0  : %llu p2 : %llu  cpp : %d circles : %d\n",comp_desc_cnt,mclock-sclock,eclock-mclock,(eclock-mclock)/comp_desc_cnt,circles);
+	return comp_desc_cnt;
 }
 #endif
 
@@ -474,6 +542,7 @@ int dma_tx(char * pkt, int pkt_len, int pkt_offset)
 
 int dma_tx_burst(uint64_t pkts[64], unsigned int *pkt_len, int pkt_offset, int num_pkts)
 {
+	uint64_t delayer, total_bytes = 0;
 	int extra_adj = num_pkts - 1, next_adj, j = 0, offset, sgdma_offset;
         int length;
 	unsigned int control = 0, w = 0;
@@ -509,13 +578,16 @@ int dma_tx_burst(uint64_t pkts[64], unsigned int *pkt_len, int pkt_offset, int n
 		if (j == num_pkts - 1) {
 			tx_desc_virt[j].next_lo = (0);
 			tx_desc_virt[j].next_hi = (0);
+			control = XDMA_DESC_STOPPED_1;
 		} else {
 			tx_desc_virt[j].next_lo = (PCI_DMA_L(tx_desc_start + sizeof(struct xdma_desc) * (j + 1)));
 			tx_desc_virt[j].next_hi = (PCI_DMA_H(tx_desc_start + sizeof(struct xdma_desc) * (j + 1)));
+			control = XDMA_DESC_STOPPED_0;
 		}
 
 		tx_desc_virt[j].bytes = pkt_len[j];
-		control |= XDMA_DESC_STOPPED_0 | XDMA_DESC_EOP | XDMA_DESC_COMPLETED;
+		total_bytes += pkt_len[j];
+		control |= XDMA_DESC_EOP | XDMA_DESC_COMPLETED;
 		tx_desc_virt[j].control = control | DESC_MAGIC;
 		/*printf("tx_desc_virt[%d].dst_addr_lo = %x\n", j, tx_desc_virt[j].dst_addr_lo);
 		printf("tx_desc_virt[j].dst_addr_hi = %x\n", tx_desc_virt[j].dst_addr_hi);
@@ -541,6 +613,9 @@ int dma_tx_burst(uint64_t pkts[64], unsigned int *pkt_len, int pkt_offset, int n
 	engine->regs->control = w;
 	//printf("control = %x, first_desc_hi = %x, first_desc_lo = %x, first_desc_adjacent = %x\n", engine->regs->control, engine->sgdma_regs->first_desc_hi, engine->sgdma_regs->first_desc_lo, engine->sgdma_regs->first_desc_adjacent);
 	//printf("waiting for tx dma to complete on channel %d\n",channel);
+	delayer = (total_bytes/5)*4;
+	delay_clock_cycles(delayer);
+	delayer = 3400;
 	sclock = current_clock_cycles();
 	while (engine->regs->completed_desc_count < num_pkts) {
 
@@ -548,8 +623,9 @@ int dma_tx_burst(uint64_t pkts[64], unsigned int *pkt_len, int pkt_offset, int n
 			printf("returning from func : %s because of guest disconnection\n",__func__);
 			return;
 		}
-		delay_clock_cycles(340);
+		//delay_clock_cycles(340);
 		eclock = current_clock_cycles();
+		delay_clock_cycles(delayer);
 
 		if(eclock - sclock > 4000000) {
 			printf("tx timeout\n");
