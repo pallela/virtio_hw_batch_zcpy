@@ -4,6 +4,7 @@
 
 #include<stdint.h>
 #include<errno.h>
+#include<emmintrin.h>
 
 #define VHOST_USER_VERSION    0x1
 
@@ -293,8 +294,14 @@ struct sg_list
 	struct mem_chunks *chunks;
 };
 
-#define wmb()   asm volatile("sfence" ::: "memory")
-#define rmb()   asm volatile("lfence" ::: "memory")
+//#define wmb()   asm volatile("sfence" ::: "memory")
+
+#define wmb()   _mm_sfence()
+//#define rmb()   asm volatile("lfence" ::: "memory")
+
+
+#define rmb()   _mm_lfence()
+
 #define barrier() asm volatile("" ::: "memory")
 
 

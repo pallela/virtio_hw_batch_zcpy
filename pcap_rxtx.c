@@ -54,6 +54,8 @@ uint64_t guestphyddr_to_vhostvadd(uint64_t gpaddr);
 unsigned char mac_address[6] = {0xb8,0x2a,0x72,0xc4,0x26,0x45};
 unsigned char broadcast_mac_address[6] = {0xff,0xff,0xff,0xff,0xff,0xff};
 
+#define RX_DESC_DEPTH 0
+
 #define RX_BURST 1
 #define RX_BATCH_SIZE 64
 void *pcap_rx_thread(void *arg)
@@ -79,6 +81,10 @@ void *pcap_rx_thread(void *arg)
 	int new_pkts_count;
 	int rx_max_pkts_len[64];
 	int recv_pkts_len[64];
+
+#if RX_DESC_DEPTH
+	int rx_desc_depth;
+#endif
 
 
 
@@ -147,14 +153,28 @@ void *pcap_rx_thread(void *arg)
 					used_idx = rx_used->idx;
 
 					if((avail_idx - used_idx) == 0) {
-						printf("Dropping packet avail_idx : %d used_idx %d\n",avail_idx,used_idx);
-						continue;
+						usleep(100);
+						avail_idx = rx_avail->idx;
+						used_idx = rx_used->idx;
+						if((avail_idx - used_idx) == 0) {
+							printf("Dropping packet avail_idx : %d used_idx %d\n",avail_idx,used_idx);
+							continue;
+						}
 					}
 					packet_addr = ((unsigned char  *)rx_packet_buff[i]);
 					//printf("packet_addr : %p buff start : %p\n",packet_addr,rx_packet_buff[i]);
 
 					//printf("avail_idx : %d and used_idx : %d diff  : %d\n",avail_idx,used_idx,avail_idx-used_idx);
 
+					#if RX_DESC_DEPTH
+					rx_desc_depth = 0;	
+					rx_desc_num = rx_avail->ring[rx_avail_ring_no];
+					while(rx_desc_base[rx_desc_num].flags & VRING_DESC_F_NEXT) {
+						rx_desc_depth++;
+						rx_desc_num = rx_desc_base[rx_desc_num].next;
+					}
+					printf("rx_desc_depth : %d\n",rx_desc_depth);			
+					#endif
 
 					if( VHOST_SUPPORTED_FEATURES &( 1ULL << VIRTIO_NET_F_MRG_RXBUF) ) {
 						rx_desc_num = rx_avail->ring[rx_avail_ring_no];
@@ -223,7 +243,7 @@ void *pcap_rx_thread(void *arg)
 					//printf("packets received : %d\n",rx_used->idx);
 				}
 				else {
-					//printf("packet address is NULL\n");
+					printf("packet len is zero\n");
 				}
 					eventfd_write(rxirqfd, (eventfd_t)1);
 					wmb();

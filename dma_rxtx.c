@@ -7,6 +7,8 @@
 #include<sys/mman.h>
 #include<stdint.h>
 
+#include"virtio.h"
+
 #define PAGE_SIZE 4096
 #define DESC_CNT 1
 #define LENGTH 4*1024
@@ -119,7 +121,8 @@ void *dma_rx(int *pkt_len)
 {
 	int extra_adj = DESC_CNT - 1, next_adj, j = 0, offset, sgdma_offset;
 	int length, i;
-	volatile unsigned int read_p, rx_desc_start;
+	//volatile unsigned int read_p, rx_desc_start;
+	volatile uint64_t read_p, rx_desc_start;
 	unsigned int control, w;
 	struct xdma_engine *engine;
 	int dir_from_dev = 0;
@@ -201,13 +204,19 @@ void *dma_rx(int *pkt_len)
 	w |= (unsigned int)XDMA_CTRL_IE_DESC_ALIGN_MISMATCH;
 	w |= (unsigned int)XDMA_CTRL_IE_MAGIC_STOPPED;
 	w |= (unsigned int)XDMA_CTRL_POLL_MODE_WB;
+
+	wmb();
+
 	engine->regs->control = w;
 	//printf("trace :  func : %s line : %u\n",__func__,__LINE__);
 	//printf("waiting for rx dma to complete on channel %d\n",channel);
 	while (engine->regs->completed_desc_count < (DESC_CNT)) {
 	if(!connected_to_guest) {
 			printf("returning from func : %s because of guest disconnection\n",__func__);
-			return;
+			*pkt_len = 0;
+			xdma_engine_stop(engine);
+			wmb();
+			return NULL;
 		}
 		delay_clock_cycles(3400);
 		//usleep(1);
@@ -220,6 +229,7 @@ void *dma_rx(int *pkt_len)
 	*pkt_len = result->length;
 	//printf("aftr packet received len : %d\n",*pkt_len);
 	xdma_engine_stop(engine);
+	wmb();
 	free(engine);
 	return (rd_data[0]);
 }
@@ -239,7 +249,8 @@ int dma_rx_burst(uint64_t *pkts, unsigned int *max_pkt_len, unsigned int *recv_l
 	int extra_adj = max_num_pkts - 1, next_adj, j = 0, offset, sgdma_offset;
 	int length, i;
 	int delayed;
-	volatile unsigned int read_p, rx_desc_start;
+	//volatile unsigned int read_p, rx_desc_start;
+	volatile uint64_t read_p, rx_desc_start;
 	unsigned int control, w, timeout;
 	struct xdma_engine *engine;
 	int dir_from_dev = 0;
@@ -318,7 +329,6 @@ int dma_rx_burst(uint64_t *pkts, unsigned int *max_pkt_len, unsigned int *recv_l
 
 	}
 
-	//result->length = 0;
 	engine->regs->completed_desc_count = 0;
 	w = PCI_DMA_L(rx_desc_start);
 	engine->sgdma_regs->first_desc_lo = PCI_DMA_L(rx_desc_start);
@@ -333,6 +343,7 @@ int dma_rx_burst(uint64_t *pkts, unsigned int *max_pkt_len, unsigned int *recv_l
 	w |= (unsigned int)XDMA_CTRL_IE_DESC_ALIGN_MISMATCH;
 	w |= (unsigned int)XDMA_CTRL_IE_MAGIC_STOPPED;
 	w |= (unsigned int)XDMA_CTRL_POLL_MODE_WB;
+	wmb();
 	engine->regs->control = w;
 	//printf("trace :  func : %s line : %u\n",__func__,__LINE__);
 	//printf("waiting for rx dma to complete on channel %d\n",channel);
@@ -346,7 +357,9 @@ sclock = current_clock_cycles();
 		//time(&stop);
 		if(!connected_to_guest) {
 			printf("returning from func : %s because of guest disconnection\n",__func__);
-			return;
+			xdma_engine_stop(engine);
+			wmb();
+			return 0;
 		}
 		/*
 		if (difftime(stop, start) > TIMEOUT) {
@@ -357,6 +370,12 @@ sclock = current_clock_cycles();
 		//usleep(1);
 		delay_clock_cycles(3400);
 		circles++;
+		#if 0
+		if(circles >= 1000000) {
+			printf("no packets for long time\n");
+			break;
+		}
+		#endif
 		comp_desc_cnt = engine->regs->completed_desc_count;
 	}
 mclock = current_clock_cycles();
@@ -375,7 +394,9 @@ mclock = current_clock_cycles();
 			new_rx_pkts = comp_desc_cnt;
 		}
 	}
+	rmb();
 	xdma_engine_stop(engine);
+	wmb();
 	//comp_desc_cnt = engine->regs->completed_desc_count;
 #endif
 	/*
@@ -393,11 +414,12 @@ mclock = current_clock_cycles();
 
 //sclock = current_clock_cycles();
 
+	rmb();
 	for(i=0;i<10;i++) {
-		delay_clock_cycles(3400);
 		if((result->status & C2H_WB) == C2H_WB){
 			break;
 		}
+		delay_clock_cycles(3400);
 	}
 
 	i = 0;delayed = 0;
@@ -413,7 +435,7 @@ mclock = current_clock_cycles();
 
 		if(!delayed) {
 			delayed= 1;
-			delay_clock_cycles(10000);
+			delay_clock_cycles(20000);
 		}
 		else {
 			break;
@@ -422,6 +444,7 @@ mclock = current_clock_cycles();
 	}
 
 	xdma_engine_stop(engine);
+	wmb();
 // If we get any new packets in between our previous check and stopping engine
 	for(;i<max_num_pkts;i++) {
 		if((result->status & C2H_WB) == C2H_WB) {
@@ -436,6 +459,9 @@ mclock = current_clock_cycles();
 eclock = current_clock_cycles();
 //printf("%d pkts took  p1  : %llu p2 : %llu  cpp : %d circles : %d\n",i,mclock-sclock,eclock-mclock,i == 0 ? 0 : (eclock-mclock)/i,circles);
 	//printf ("rxps: %d\n", i);
+	if(i == 0 ){
+		printf("Dont know how zero packets came when engine->regs->completed_desc_count : %u\n",engine->regs->completed_desc_count);
+	}
 	return i;
 #endif
 	//printf("%x", rd_data[i]);
@@ -460,8 +486,8 @@ int dma_tx(char * pkt, int pkt_len, int pkt_offset)
     int extra_adj = DESC_CNT - 1, next_adj, j = 0, offset, sgdma_offset;
         int length;
     unsigned int control, control_field, w;
-    //uint64_t write_p, tx_desc_start;
-    unsigned int write_p, tx_desc_start;
+    uint64_t write_p, tx_desc_start;
+    //unsigned int write_p, tx_desc_start;
     struct xdma_engine *engine;
     int dir_from_dev = 0;
 
@@ -522,33 +548,40 @@ int dma_tx(char * pkt, int pkt_len, int pkt_offset)
     w |= (unsigned int)XDMA_CTRL_IE_DESC_ALIGN_MISMATCH;
     w |= (unsigned int)XDMA_CTRL_IE_MAGIC_STOPPED;
     w |= (unsigned int)XDMA_CTRL_POLL_MODE_WB;
+	wmb();
     engine->regs->control = w;
     //printf("waiting for tx dma to complete on channel %d\n",channel);
     while (engine->regs->completed_desc_count < (DESC_CNT)) {
 
         if(!connected_to_guest) {
+	    xdma_engine_stop(engine);
+	    wmb();
             printf("returning from func : %s because of guest disconnection\n",__func__);
-            return;
+	    free(engine);
+            return 0;
         }
         delay_clock_cycles(3400);
         //usleep(1);
 
     }
-  //printf("simple_write() : engine->regs->completed_desc_count = %d\n", engine->regs->completed_desc_count);
+    //printf("simple_write() : engine->regs->completed_desc_count = %d\n", engine->regs->completed_desc_count);
     xdma_engine_stop(engine);
+	wmb();
     free(engine);
+    return 0;
 }
 
 
 int dma_tx_burst(uint64_t pkts[64], unsigned int *pkt_len, int pkt_offset, int num_pkts)
 {
 	uint64_t delayer, total_bytes = 0;
-	int extra_adj = num_pkts - 1, next_adj, j = 0, offset, sgdma_offset;
+	int extra_adj = num_pkts - 1, next_adj, i,j = 0, offset, sgdma_offset;
         int length;
 	unsigned int control = 0, w = 0;
-	unsigned int write_p, tx_desc_start;
+	//unsigned int write_p, tx_desc_start;
+	uint64_t write_p, tx_desc_start;
 	struct xdma_engine *engine;
-	int dir_from_dev = 0;
+	int dir_from_dev = 0,tx_to = 0;;
 	uint64_t sclock,eclock;
 
         tx_desc_start = data->tx_queue_dma_addr;
@@ -610,6 +643,7 @@ int dma_tx_burst(uint64_t pkts[64], unsigned int *pkt_len, int pkt_offset, int n
 	w |= (unsigned int)XDMA_CTRL_IE_DESC_ALIGN_MISMATCH;
 	w |= (unsigned int)XDMA_CTRL_IE_MAGIC_STOPPED;
 	w |= (unsigned int)XDMA_CTRL_POLL_MODE_WB;
+	wmb();
 	engine->regs->control = w;
 	//printf("control = %x, first_desc_hi = %x, first_desc_lo = %x, first_desc_adjacent = %x\n", engine->regs->control, engine->sgdma_regs->first_desc_hi, engine->sgdma_regs->first_desc_lo, engine->sgdma_regs->first_desc_adjacent);
 	//printf("waiting for tx dma to complete on channel %d\n",channel);
@@ -620,15 +654,17 @@ int dma_tx_burst(uint64_t pkts[64], unsigned int *pkt_len, int pkt_offset, int n
 	while (engine->regs->completed_desc_count < num_pkts) {
 
 		if(!connected_to_guest) {
+	    		xdma_engine_stop(engine);
+			wmb();
 			printf("returning from func : %s because of guest disconnection\n",__func__);
-			return;
+			return 0;
 		}
-		//delay_clock_cycles(340);
 		eclock = current_clock_cycles();
-		delay_clock_cycles(delayer);
+		//delay_clock_cycles(delayer);
 
 		if(eclock - sclock > 4000000) {
 			printf("tx timeout\n");
+			tx_to = 1;
 			break;
 		}
 		//usleep(1);
@@ -637,7 +673,17 @@ int dma_tx_burst(uint64_t pkts[64], unsigned int *pkt_len, int pkt_offset, int n
 	//printf("simple_write() : engine->regs->completed_desc_count = %d\n", engine->regs->completed_desc_count);
 	//}
 	xdma_engine_stop(engine);
+	wmb();
+
+	if(tx_to) {
+		for(i=0;i<20;i++) {
+			usleep(10);
+			printf("stop status : %x\n",engine->regs->status);
+		}
+	}
 	//free(engine);
+
+	return 0;
 }
 
 int configfd;

@@ -164,14 +164,14 @@ void * transmit_thread(void *args)
 
 			if(new_avail_descs == 0) {
 				//usleep(1);
-				delay_clock_cycles(10000);
+				delay_clock_cycles(1000);
 				continue;
 			}
 
 			do {
 				prev_new_avail_desc = new_avail_descs;
 				//usleep(1);
-				delay_clock_cycles(60000);
+				delay_clock_cycles(100000);
 				temp = tx_avail->idx;
 				cur_avail_idx = tx_last_avail_idx;
 				new_avail_descs = temp - tx_last_avail_idx;
