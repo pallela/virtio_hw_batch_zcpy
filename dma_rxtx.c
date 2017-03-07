@@ -236,6 +236,8 @@ void *dma_rx(int *pkt_len)
 
 
 
+#define RX_TIMEOUT 1
+
 #if 1
 /* pkts -> phy addr of pkts
    pkts_lengths_max -> len of each received packet
@@ -370,7 +372,7 @@ sclock = current_clock_cycles();
 		//usleep(1);
 		delay_clock_cycles(3400);
 		circles++;
-		#if 0
+		#if RX_TIMEOUT /*timeout for RX*/
 		if(circles >= 1000000) {
 			printf("no packets for long time\n");
 			break;
