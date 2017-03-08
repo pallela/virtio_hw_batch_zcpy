@@ -54,7 +54,6 @@ uint64_t guestphyddr_to_vhostvadd(uint64_t gpaddr);
 unsigned char mac_address[6] = {0xb8,0x2a,0x72,0xc4,0x26,0x45};
 unsigned char broadcast_mac_address[6] = {0xff,0xff,0xff,0xff,0xff,0xff};
 
-#define RX_DESC_DEPTH 0
 
 #define RX_BURST 1
 #define RX_BATCH_SIZE 64
@@ -74,17 +73,16 @@ void *pcap_rx_thread(void *arg)
 	int i,rx_len;
 	uint16_t rx_desc_num = 0,rx_header_desc_num = 0,rx_avail_ring_no = 0,rx_used_ring_no = 0;
 	unsigned char  *packet_addr;
-	uint32_t packet_len;
+	uint32_t packet_len,packet_len2;
 	uint16_t avail_idx,used_idx;
 	struct virtio_net_hdr_mrg_rxbuf *tmpheader;
 	int rx_cleanup_required;
 	int new_pkts_count;
 	int rx_max_pkts_len[64];
 	int recv_pkts_len[64];
-
-#if RX_DESC_DEPTH
 	int rx_desc_depth;
-#endif
+	int rx_recv_len;
+	int copylen;
 
 
 
@@ -166,32 +164,71 @@ void *pcap_rx_thread(void *arg)
 
 					//printf("avail_idx : %d and used_idx : %d diff  : %d\n",avail_idx,used_idx,avail_idx-used_idx);
 
-					#if RX_DESC_DEPTH
-					rx_desc_depth = 0;	
-					rx_desc_num = rx_avail->ring[rx_avail_ring_no];
-					while(rx_desc_base[rx_desc_num].flags & VRING_DESC_F_NEXT) {
-						rx_desc_depth++;
-						rx_desc_num = rx_desc_base[rx_desc_num].next;
-					}
-					printf("rx_desc_depth : %d\n",rx_desc_depth);			
-					#endif
-
+					
 					if( VHOST_SUPPORTED_FEATURES &( 1ULL << VIRTIO_NET_F_MRG_RXBUF) ) {
+
+
+					//printf("rx_desc_depth is enabled\n");
+
+						rx_desc_depth = 0;	
+						rx_desc_num = rx_avail->ring[rx_avail_ring_no];
+						rx_recv_len = 0;
+
+						while(rx_desc_base[rx_desc_num].flags & VRING_DESC_F_NEXT) {
+							rx_desc_depth++;
+							rx_desc_num = rx_desc_base[rx_desc_num].next;
+							rx_recv_len += rx_desc_base[rx_desc_num].len;
+							//printf("rx_desc_depth : %d\n",rx_desc_depth);
+						}
+
+						rx_recv_len += rx_desc_base[rx_desc_num].len; // adding len for last desc buffer which does not have VRING_DESC_F_NEXT flag set
+
+						//printf("rx_desc_depth total : %d  rx_recv_len aggr : %d\n",rx_desc_depth,rx_recv_len);
+
 						rx_desc_num = rx_avail->ring[rx_avail_ring_no];
 						rx_header_desc_num = rx_desc_num;
-						tmp = (void *)guestphyddr_to_vhostvadd(rx_desc_base[rx_desc_num].addr);
 
-						if(rx_desc_base[rx_desc_num].len < (vhost_hlen + recv_pkts_len[i])) {
+						//tmp = (void *)guestphyddr_to_vhostvadd(rx_desc_base[rx_desc_num].addr);
+
+						//if(rx_desc_base[rx_desc_num].len < (vhost_hlen + recv_pkts_len[i])) {
+						if(rx_recv_len < (vhost_hlen + recv_pkts_len[i])) {
 							//printf("receive desc buff len : %d and packet len : %d ,so dropping packet\n"
 							//		,rx_desc_base[rx_desc_num].len,header.len);
-							printf("receive desc buff len : %d and packet len : %d ,so dropping packet\n"
-									,rx_desc_base[rx_desc_num].len,recv_pkts_len[i]);
+							printf("max receive aggr buff len : %d and packet len : %d ,so dropping packet\n"
+									,rx_recv_len,recv_pkts_len[i]);
+							printf("receive desc buff len : %d \n",rx_desc_base[rx_desc_num].len);
 							continue;
 						}
+						
+						tmp = (void *)guestphyddr_to_vhostvadd(rx_desc_base[rx_desc_num].addr);
+
 						//packet_len = header.len;
 						packet_len = recv_pkts_len[i];
+						packet_len2 = packet_len;
+
 						memset(tmp,0,vhost_hlen);
-						memcpy(tmp+vhost_hlen,packet_addr,packet_len);
+
+						tmpheader = (struct virtio_net_hdr_mrg_rxbuf *)tmp;
+						tmpheader->num_buffers = 1;
+
+						copylen = (rx_desc_base[rx_desc_num].len-vhost_hlen) > packet_len2  ? packet_len2 : (rx_desc_base[rx_desc_num].len-vhost_hlen);
+						memcpy(tmp+vhost_hlen,packet_addr,copylen);
+
+						packet_len2 -= copylen;
+						packet_addr += copylen;
+
+						rx_desc_num = rx_desc_base[rx_desc_num].next;
+
+						while(packet_len2) { // No need to check VRING_DESC_F_NEXT as already verified earlier
+							//printf("packet_len2 : %d\n",packet_len2);
+							tmp = (void *)guestphyddr_to_vhostvadd(rx_desc_base[rx_desc_num].addr);
+							copylen = (rx_desc_base[rx_desc_num].len) > packet_len2 ? packet_len2 : (rx_desc_base[rx_desc_num].len-vhost_hlen);
+							memcpy(tmp,packet_addr,copylen);
+							packet_len2 -= copylen;
+							packet_addr += copylen;
+							rx_desc_num = rx_desc_base[rx_desc_num].next;
+							tmpheader->num_buffers++;
+						}
 						//printf("recv packet : %d bytes\n",packet_len);
 
 					}

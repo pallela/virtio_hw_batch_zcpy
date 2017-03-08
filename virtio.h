@@ -349,9 +349,9 @@ struct sg_list
 //#define VHOST_SUPPORTED_FEATURES ((1ULL << VIRTIO_NET_F_MRG_RXBUF) | \
 
 
-#define KERNEL_DRIVER 1
+#define MERGED_RX_HDR_AND_BUFF 1
 
-#if KERNEL_DRIVER
+#if !MERGED_RX_HDR_AND_BUFF
 #define VHOST_SUPPORTED_FEATURES ((1ULL << VIRTIO_NET_F_CTRL_VQ) | \
                                 (1ULL << VIRTIO_NET_F_CTRL_RX) | \
 				(1ULL << VIRTIO_F_VERSION_1)   | \
