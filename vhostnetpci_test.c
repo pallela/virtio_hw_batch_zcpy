@@ -245,6 +245,7 @@ void * transmit_thread(void *args)
 
 						memcpy(tx_packet_buff[j] + tx_buff_len,packet_addr,packet_len);
 						tx_buff_len += packet_len;
+						tx_buff_len -= vhost_hlen;
 						tx_packet_len[j] = tx_buff_len;
 						//print_hex(tx_packet_buff,tx_buff_len);
 						//pcap_tx(handle,tx_packet_buff+vhost_hlen,tx_buff_len-vhost_hlen);
