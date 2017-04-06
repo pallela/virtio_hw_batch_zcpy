@@ -7,6 +7,25 @@
 #include<semaphore.h>
 #include"dma_rxtx.h"
 
+#define CACHE_ALIGN 64
+static inline clflush_multiple(volatile void *__p,int size)
+{
+        int i,cnt;
+        void *addr;
+
+        addr = (void *) ((uintptr_t)__p - ((uintptr_t)__p)%CACHE_ALIGN);
+        //printf("__p  : %llx and addr : %llx\n",__p,addr);
+        cnt =  size/CACHE_ALIGN + 1;
+
+        for(i=0;i<cnt;i++) {
+                //asm volatile("clflush %0" : "+m" (*(volatile char *)__p));
+
+                asm volatile("clflush %0" : "+m" (*(volatile  char *) addr));
+                addr += CACHE_ALIGN;
+        }
+}
+
+
 static bpf_u_int32 net;		/* Our IP */
 pcap_t *pcap_init(char *iname)
 {
@@ -48,6 +67,7 @@ extern volatile connected_to_guest;
 extern int vhost_hlen;
 extern uint64_t *coherent_rx_hw_addresses;
 extern char **rx_packet_buff;
+extern uint64_t *rx_packet_physaddrs;
 
 uint64_t guestphyddr_to_vhostvadd(uint64_t gpaddr);
 
@@ -55,22 +75,13 @@ unsigned char mac_address[6] = {0xb8,0x2a,0x72,0xc4,0x26,0x45};
 unsigned char broadcast_mac_address[6] = {0xff,0xff,0xff,0xff,0xff,0xff};
 
 
-#define RX_BURST 1
+#define RX_BURST 0
 #define RX_BATCH_SIZE 64
 void *pcap_rx_thread(void *arg)
 {
-	//	struct bpf_program fp;		/* The compiled filter */
-	//char filter_exp[] = "ether dst 00:00:00:00:00:01 ";	/* The filter expression */
-	//char filter_exp[] = "ether dst b8:2a:72:c4:26:45 or ether dst ff:ff:ff:ff:ff:ff  or  arp";	/* The filter expression */
-	//char filter_exp[] = "ether dst b8:2a:72:c4:26:45 or  arp";	/* The filter expression */
-	//	char filter_exp[] = "ether dst 00:00:00:00:00:01 or  arp";	/* The filter expression */
-	//char filter_exp[] = "";	/* The filter expression */
-	//	struct pcap_pkthdr header;	/* The header that pcap gives us */
 	const u_char *packet;		/* The actual packet */
-	//	pcap_t *handle;
 	void  *tmp;
-	//	uint16_t *nbuffs;
-	int i,rx_len;
+	int i,j,rx_len;
 	uint16_t rx_desc_num = 0,rx_header_desc_num = 0,rx_avail_ring_no = 0,rx_used_ring_no = 0;
 	unsigned char  *packet_addr;
 	uint32_t packet_len,packet_len2;
@@ -83,207 +94,120 @@ void *pcap_rx_thread(void *arg)
 	int rx_desc_depth;
 	int rx_recv_len;
 	int copylen;
+	int new_avail_descs;
+	int rx_avail_ring_no_tmp;
 
-
-
-#if 0
-	handle = (pcap_t *) arg;
-
-	printf("starting rx thread with pcap handle : %p\n",handle);
-
-	/* Compile and apply the filter */
-	if (pcap_compile(handle, &fp, filter_exp, 0, net) == -1) {
-		fprintf(stderr, "Couldn't parse filter %s: %s\n", filter_exp, pcap_geterr(handle));
-		return;
-	}
-
-	if (pcap_setfilter(handle, &fp) == -1) {
-		fprintf(stderr, "Couldn't install filter %s: %s\n", filter_exp, pcap_geterr(handle));
-		return;
-	}
-#endif
 
 	printf("starting rx thread\n");
 	while(1) {
 
-		/* Grab a packet */
-		//packet = pcap_next(handle, &header);
 		if(connected_to_guest) {
-			//		printf("before rx_len : %d and addr : %p\n",rx_len,packet);
+			avail_idx = rx_avail->idx;
+			used_idx = rx_used->idx;
+			new_avail_descs = avail_idx- used_idx;
+			if(!new_avail_descs) {
+				usleep(1);
+				continue;
+			}
+
+			if(new_avail_descs > RX_BATCH_SIZE) {
+				new_avail_descs = RX_BATCH_SIZE;
+			}
+
 			#if !RX_BURST
-			packet = dma_rx(&rx_len);
+			if( VHOST_SUPPORTED_FEATURES &( 1ULL << VIRTIO_NET_F_MRG_RXBUF) ) {
+				rx_desc_num = rx_avail->ring[rx_avail_ring_no];
+				tmp = (void *)guestphyddr_to_hostphysaddr(rx_desc_base[rx_desc_num].addr);
+				rx_packet_physaddrs[0] = (uint64_t) (tmp + vhost_hlen);
+				rx_len = rx_desc_base[rx_desc_num].len - vhost_hlen;
+				//tmp = (void *)guestphyddr_to_vhostvadd(rx_desc_base[rx_desc_num].addr);
+				//clflush_multiple(tmp+vhost_hlen,rx_len);
+			}
+			else {
+				rx_desc_num = rx_avail->ring[rx_avail_ring_no];
+				rx_desc_num = rx_desc_base[rx_desc_num].next;
+				tmp = (void *)guestphyddr_to_hostphysaddr(rx_desc_base[rx_desc_num].addr);
+				rx_packet_physaddrs[0] = (uint64_t) tmp;
+				rx_len = rx_desc_base[rx_desc_num].len;
+				//tmp = (void *)guestphyddr_to_vhostvadd(rx_desc_base[rx_desc_num].addr);
+				//clflush_multiple(tmp,rx_len);
+			}
+
+			//printf("received packet buff : %d bytes at physical address %llx\n",rx_len,rx_packet_physaddrs[0]);
+			packet = dma_rx(&rx_len,rx_packet_physaddrs[0]);
 			if(packet) {
 				new_pkts_count = 1;
 				recv_pkts_len[0] = rx_len;
+				//printf("received packet : %d bytes at physical address %llx\n",rx_len,rx_packet_physaddrs[0]);
 			}else {
 				new_pkts_count = 0;
 				recv_pkts_len[0] = 0;
+				//printf("Not received packet\n");
 			}
 			#else
-			//new_pkts_count = dma_rx_burst(coherent_rx_hw_addresses,rx_max_pkts_len,recv_pkts_len,vhost_hlen,64);
-			new_pkts_count = dma_rx_burst(coherent_rx_hw_addresses,rx_max_pkts_len,recv_pkts_len,0,RX_BATCH_SIZE);
-			//dma_rx(&rx_len);
-			//new_pkts_count = 1;
-			//recv_pkts_len[0] = rx_len;
-			if(!new_pkts_count)
-			printf("received new_pkts_count : %d\n",new_pkts_count);
+			rx_avail_ring_no_tmp = rx_avail_ring_no;
+			for(j=0;j<new_avail_descs;j++) {
+
+				if( VHOST_SUPPORTED_FEATURES &( 1ULL << VIRTIO_NET_F_MRG_RXBUF) ) {
+					rx_desc_num = rx_avail->ring[rx_avail_ring_no_tmp];
+					tmp = (void *)guestphyddr_to_hostphysaddr(rx_desc_base[rx_desc_num].addr);
+					rx_packet_physaddrs[j] = (uint64_t) tmp + (uint64_t) vhost_hlen;
+					recv_pkts_len[j] = rx_desc_base[rx_desc_num].len - vhost_hlen;
+				}
+				else {
+					rx_desc_num = rx_avail->ring[rx_avail_ring_no_tmp];
+					rx_desc_num = rx_desc_base[rx_desc_num].next;
+					tmp = (void *)guestphyddr_to_hostphysaddr(rx_desc_base[rx_desc_num].addr);
+					rx_packet_physaddrs[j] = (uint64_t) tmp;
+					recv_pkts_len[j] = rx_desc_base[rx_desc_num].len;
+				}
+				rx_avail_ring_no_tmp  = (rx_avail_ring_no_tmp + 1)%rx_desc_count;
+
+			}
+
+			//printf("recv pkts max cnt  : %d\n",new_avail_descs);
+			new_pkts_count = dma_rx_burst(rx_packet_physaddrs,recv_pkts_len,recv_pkts_len,0,new_avail_descs);
+			if(!new_pkts_count) {
+				//printf("zero pkts received, received new_pkts_count : %d\n",new_pkts_count);
+				usleep(1);
+				continue;
+			}
+			else {
+				//printf("received new_pkts_count : %d\n",new_pkts_count);
+			}
 			#endif
-			//printf("later rx_len : %d and addr : %p\n",rx_len,packet);
-			//packet_addr = (unsigned char *) packet;
 		}
-		/* Print its length */
 
-
-#if 1
 		if(new_pkts_count > 0 && connected_to_guest) {
 
 			for(i=0;i<new_pkts_count;i++) {
 
-				//printf("received a packet with length of [%d]\n", header.len);
-			//	printf("received a packet %d with length of [%d]\n",i,recv_pkts_len[i]);
-	
-				if(recv_pkts_len[i]) {
-
-					//printf("vhost rx packet at address : %p len : %d\n",(void *) packet,header.len);
-					//printf("vhost rx packet len : %d\n",header.len);
-
-					avail_idx = rx_avail->idx;
-					used_idx = rx_used->idx;
-
-					if((avail_idx - used_idx) == 0) {
-						usleep(100);
-						avail_idx = rx_avail->idx;
-						used_idx = rx_used->idx;
-						if((avail_idx - used_idx) == 0) {
-							printf("Dropping packet avail_idx : %d used_idx %d\n",avail_idx,used_idx);
-							continue;
-						}
-					}
-					packet_addr = ((unsigned char  *)rx_packet_buff[i]);
-					//printf("packet_addr : %p buff start : %p\n",packet_addr,rx_packet_buff[i]);
-
-					//printf("avail_idx : %d and used_idx : %d diff  : %d\n",avail_idx,used_idx,avail_idx-used_idx);
-
-					
-					if( VHOST_SUPPORTED_FEATURES &( 1ULL << VIRTIO_NET_F_MRG_RXBUF) ) {
-
-
-					//printf("rx_desc_depth is enabled\n");
-
-						rx_desc_depth = 0;	
-						rx_desc_num = rx_avail->ring[rx_avail_ring_no];
-						rx_recv_len = 0;
-
-						while(rx_desc_base[rx_desc_num].flags & VRING_DESC_F_NEXT) {
-							rx_desc_depth++;
-							rx_desc_num = rx_desc_base[rx_desc_num].next;
-							rx_recv_len += rx_desc_base[rx_desc_num].len;
-							//printf("rx_desc_depth : %d\n",rx_desc_depth);
-						}
-
-						rx_recv_len += rx_desc_base[rx_desc_num].len; // adding len for last desc buffer which does not have VRING_DESC_F_NEXT flag set
-
-						//printf("rx_desc_depth total : %d  rx_recv_len aggr : %d\n",rx_desc_depth,rx_recv_len);
-
-						rx_desc_num = rx_avail->ring[rx_avail_ring_no];
-						rx_header_desc_num = rx_desc_num;
-
-						//tmp = (void *)guestphyddr_to_vhostvadd(rx_desc_base[rx_desc_num].addr);
-
-						//if(rx_desc_base[rx_desc_num].len < (vhost_hlen + recv_pkts_len[i])) {
-						if(rx_recv_len < (vhost_hlen + recv_pkts_len[i])) {
-							//printf("receive desc buff len : %d and packet len : %d ,so dropping packet\n"
-							//		,rx_desc_base[rx_desc_num].len,header.len);
-							printf("max receive aggr buff len : %d and packet len : %d ,so dropping packet\n"
-									,rx_recv_len,recv_pkts_len[i]);
-							printf("receive desc buff len : %d \n",rx_desc_base[rx_desc_num].len);
-							continue;
-						}
-						
-						tmp = (void *)guestphyddr_to_vhostvadd(rx_desc_base[rx_desc_num].addr);
-
-						//packet_len = header.len;
-						packet_len = recv_pkts_len[i];
-						packet_len2 = packet_len;
-
-						memset(tmp,0,vhost_hlen);
-
-						tmpheader = (struct virtio_net_hdr_mrg_rxbuf *)tmp;
-						tmpheader->num_buffers = 1;
-
-						copylen = (rx_desc_base[rx_desc_num].len-vhost_hlen) > packet_len2  ? packet_len2 : (rx_desc_base[rx_desc_num].len-vhost_hlen);
-						memcpy(tmp+vhost_hlen,packet_addr,copylen);
-
-						packet_len2 -= copylen;
-						packet_addr += copylen;
-
-						rx_desc_num = rx_desc_base[rx_desc_num].next;
-
-						while(packet_len2) { // No need to check VRING_DESC_F_NEXT as already verified earlier
-							//printf("packet_len2 : %d\n",packet_len2);
-							tmp = (void *)guestphyddr_to_vhostvadd(rx_desc_base[rx_desc_num].addr);
-							copylen = (rx_desc_base[rx_desc_num].len) > packet_len2 ? packet_len2 : (rx_desc_base[rx_desc_num].len-vhost_hlen);
-							memcpy(tmp,packet_addr,copylen);
-							packet_len2 -= copylen;
-							packet_addr += copylen;
-							rx_desc_num = rx_desc_base[rx_desc_num].next;
-							tmpheader->num_buffers++;
-						}
-						//printf("recv packet : %d bytes\n",packet_len);
-
-					}
-					else {
-						rx_desc_num = rx_avail->ring[rx_avail_ring_no];
-						rx_header_desc_num = rx_desc_num;
-						tmp = (void *)guestphyddr_to_vhostvadd(rx_desc_base[rx_desc_num].addr);
-						//printf("header desc no : %d\n",rx_desc_num);
-						//printf("tmp( virtio header ): %p \n",tmp);
-						memset(tmp,0,vhost_hlen);
-						//printf("virtio header done\n");
-						rx_desc_num = rx_desc_base[rx_desc_num].next;
-						//printf("packet data desc no : %d\n",rx_desc_num);
-
-						if(rx_desc_base[rx_desc_num].len < recv_pkts_len[i]) {
-							//printf("receive desc buff len : %d and packet len : %d ,so dropping packet\n"
-							//		,rx_desc_base[rx_desc_num].len,header.len);
-							//	printf("receive desc buff len : %d and packet len : %d ,so dropping packet\n"
-							//			,rx_desc_base[rx_desc_num].len,rx_len);
-
-							printf("dropping packet because rx_desc_base[rx_desc_num].len : %d and recv_pkts_len[%d] : %d\n",
-							rx_desc_base[rx_desc_num].len,i,recv_pkts_len[i]);
-							continue;
-						}
-						//printf("receive desc buff len : %d and packet len : %d\n",rx_desc_base[rx_desc_num].len,header.len);
-
-						tmp = (void *)guestphyddr_to_vhostvadd(rx_desc_base[rx_desc_num].addr);
-						//printf("tmp ( packet data ): %p \n",tmp);
-						//packet_len = header.len;
-						packet_len = recv_pkts_len[i];
-						memcpy(tmp,packet_addr,packet_len);
-						//printf("packet copied to VM memory i : %d len : %d new_pkts_count : %d\n",i,recv_pkts_len[i],new_pkts_count);
-						rx_len = 0;
-					}
-
-					rx_avail_ring_no = (rx_avail_ring_no + 1)%rx_desc_count;
-					wmb();
-
-					//rx_used->ring[rx_used_ring_no].id = rx_desc_num;
-					rx_used->ring[rx_used_ring_no].id = rx_header_desc_num;
-					rx_used->ring[rx_used_ring_no].len = vhost_hlen + packet_len;
-					//rx_desc_num = (rx_desc_num+2)%rx_desc_count;
-					rx_used_ring_no = (rx_used_ring_no +1)%rx_desc_count;
-					wmb();
-					rx_used->idx++;
-					wmb();
-					//eventfd_write(rxirqfd, (eventfd_t)1);
-					//wmb();
-					//printf("packets received : %d\n",rx_used->idx);
+				rx_desc_num = rx_avail->ring[rx_avail_ring_no];
+				rx_header_desc_num = rx_desc_num;
+				tmp = (void *)guestphyddr_to_vhostvadd(rx_desc_base[rx_desc_num].addr);
+				memset(tmp,0,vhost_hlen);
+				
+				if( VHOST_SUPPORTED_FEATURES &( 1ULL << VIRTIO_NET_F_MRG_RXBUF) ) {
+					tmpheader = (struct virtio_net_hdr_mrg_rxbuf *)tmp;
+					tmpheader->num_buffers = 1;
 				}
-				else {
-					printf("packet len is zero\n");
-				}
-					eventfd_write(rxirqfd, (eventfd_t)1);
-					wmb();
+
+
+				packet_len = recv_pkts_len[i];
+
+				rx_avail_ring_no = (rx_avail_ring_no + 1)%rx_desc_count;
+				wmb();
+
+				rx_used->ring[rx_used_ring_no].id = rx_header_desc_num;
+				rx_used->ring[rx_used_ring_no].len = vhost_hlen + packet_len;
+				rx_used_ring_no = (rx_used_ring_no +1)%rx_desc_count;
+				wmb();
+				rx_used->idx++;
+				wmb();
+				eventfd_write(rxirqfd, (eventfd_t)1);
+				wmb();
+				//printf("Informed VM about new packet , rx_used->idx : %u packet_len : %u rx_avail_ring_no : %u rx_used_ring_no : %u\n"
+				//,rx_used->idx,packet_len,rx_avail_ring_no,rx_used_ring_no);
 			}
 		}
 		else if(!connected_to_guest) {
@@ -304,10 +228,8 @@ void *pcap_rx_thread(void *arg)
 					rx_max_pkts_len[i] = 4096-vhost_hlen;
 				}
 			}
-			//usleep(10000);
 		}
 	}
-#endif
 	/* And close the session */
 }
 

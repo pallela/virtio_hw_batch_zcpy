@@ -17,9 +17,9 @@
 #define TIMEOUT 3
 extern volatile connected_to_guest;
 int channel;
-struct mydata *data;
-unsigned int * bar_base_user;
-unsigned int  *rd_data[64], *wr_data[64];
+volatile struct mydata *data;
+volatile unsigned int * bar_base_user;
+volatile unsigned int  *rd_data[64], *wr_data[64];
 struct mydata
 {
         //struct device dev;
@@ -39,9 +39,9 @@ struct mydata
 
 int simple_read(/*struct packet *pkt*/);
 int simple_write(/*struct packet *pkt*/);
-struct xdma_desc *tx_desc_virt;
-struct xdma_desc *rx_desc_virt;
-struct xdma_result *rx_result_virt;
+volatile struct xdma_desc *tx_desc_virt;
+volatile struct xdma_desc *rx_desc_virt;
+volatile struct xdma_result *rx_result_virt;
 extern unsigned char **tx_packet_buff;
 extern unsigned char **rx_packet_buff;
 extern uint64_t *coherent_tx_hw_addresses;
@@ -51,7 +51,7 @@ extern uint64_t *coherent_rx_hw_addresses;
  * xdma_engine_stop() - stop an SG DMA engine
  */
 
-void xdma_engine_stop(struct xdma_engine *engine)
+void xdma_engine_stop(volatile struct xdma_engine *engine)
 {
 	unsigned int w;
 
@@ -117,7 +117,7 @@ static inline __attribute__((always_inline)) void delay_clock_cycles(uint64_t cl
 
 
 
-void *dma_rx(int *pkt_len)
+void *dma_rx(int *pkt_len, uint64_t pktpaddr)
 {
 	int extra_adj = DESC_CNT - 1, next_adj, j = 0, offset, sgdma_offset;
 	int length, i;
@@ -131,8 +131,10 @@ void *dma_rx(int *pkt_len)
 	rx_desc_start = data->rx_queue_dma_addr;
 	//printf("trace :  func : %s line : %u rx_desc_start : %x\n",__func__,__LINE__,rx_desc_start);
 
-	read_p = data->coherent_mem_rx_dma_addr[0];
-	length = LENGTH; /*max pkt size recv is 4096*/
+	//read_p = data->coherent_mem_rx_dma_addr[0];
+	read_p = pktpaddr;
+	//length = LENGTH; /*max pkt size recv is 4096*/
+	length = *pkt_len; /*max pkt size recv is 4096*/
 
 	engine = malloc(sizeof(struct xdma_engine));
 	if (!engine) {
@@ -205,7 +207,8 @@ void *dma_rx(int *pkt_len)
 	w |= (unsigned int)XDMA_CTRL_IE_MAGIC_STOPPED;
 	w |= (unsigned int)XDMA_CTRL_POLL_MODE_WB;
 
-	wmb();
+	//wmb();
+	mb();
 
 	engine->regs->control = w;
 	//printf("trace :  func : %s line : %u\n",__func__,__LINE__);
@@ -215,7 +218,8 @@ void *dma_rx(int *pkt_len)
 			printf("returning from func : %s because of guest disconnection\n",__func__);
 			*pkt_len = 0;
 			xdma_engine_stop(engine);
-			wmb();
+			//wmb();
+			mb();
 			return NULL;
 		}
 		delay_clock_cycles(3400);
@@ -229,14 +233,16 @@ void *dma_rx(int *pkt_len)
 	*pkt_len = result->length;
 	//printf("aftr packet received len : %d\n",*pkt_len);
 	xdma_engine_stop(engine);
-	wmb();
+	//wmb();
+	mb();
 	free(engine);
-	return (rd_data[0]);
+	//return (rd_data[0]);
+	return pktpaddr;
 }
 
 
 
-#define RX_TIMEOUT 1
+#define RX_TIMEOUT 0
 
 #if 1
 /* pkts -> phy addr of pkts
@@ -302,8 +308,8 @@ int dma_rx_burst(uint64_t *pkts, unsigned int *max_pkt_len, unsigned int *recv_l
 			rx_desc_virt[j].next_hi = (PCI_DMA_H(rx_desc_start + sizeof(struct xdma_desc) * (j + 1)));
 		}
 
-//		rx_desc_virt[j].bytes = max_pkt_len[j]; /*max pkt size recv is 4096*/
-		rx_desc_virt[j].bytes = 4096; /*max pkt size recv is 4096*/
+		rx_desc_virt[j].bytes = max_pkt_len[j]; /*max pkt size recv is 4096*/
+		//rx_desc_virt[j].bytes = 4096; /*max pkt size recv is 4096*/
 
 		control = DESC_MAGIC | XDMA_DESC_EOP | XDMA_DESC_COMPLETED;
 		//if (j == DESC_CNT - 1)   /* if last packet */
@@ -331,7 +337,7 @@ int dma_rx_burst(uint64_t *pkts, unsigned int *max_pkt_len, unsigned int *recv_l
 
 	}
 
-	engine->regs->completed_desc_count = 0;
+	//engine->regs->completed_desc_count = 0;
 	w = PCI_DMA_L(rx_desc_start);
 	engine->sgdma_regs->first_desc_lo = PCI_DMA_L(rx_desc_start);
 	w = (PCI_DMA_H(rx_desc_start));
@@ -345,8 +351,10 @@ int dma_rx_burst(uint64_t *pkts, unsigned int *max_pkt_len, unsigned int *recv_l
 	w |= (unsigned int)XDMA_CTRL_IE_DESC_ALIGN_MISMATCH;
 	w |= (unsigned int)XDMA_CTRL_IE_MAGIC_STOPPED;
 	w |= (unsigned int)XDMA_CTRL_POLL_MODE_WB;
-	wmb();
+	//wmb();
+	mb();
 	engine->regs->control = w;
+	mb();
 	//printf("trace :  func : %s line : %u\n",__func__,__LINE__);
 	//printf("waiting for rx dma to complete on channel %d\n",channel);
 	//printf("control = %x, first_desc_hi = %x, first_desc_lo = %x, first_desc_adjacent = %x\n", engine->regs->control, engine->sgdma_regs->first_desc_hi, engine->sgdma_regs->first_desc_lo, engine->sgdma_regs->first_desc_adjacent);
@@ -360,7 +368,8 @@ sclock = current_clock_cycles();
 		if(!connected_to_guest) {
 			printf("returning from func : %s because of guest disconnection\n",__func__);
 			xdma_engine_stop(engine);
-			wmb();
+			//wmb();
+			mb();
 			return 0;
 		}
 		/*
@@ -396,9 +405,11 @@ mclock = current_clock_cycles();
 			new_rx_pkts = comp_desc_cnt;
 		}
 	}
-	rmb();
+	//rmb();
+	mb();
 	xdma_engine_stop(engine);
-	wmb();
+	//wmb();
+	mb();
 	//comp_desc_cnt = engine->regs->completed_desc_count;
 #endif
 	/*
@@ -416,7 +427,8 @@ mclock = current_clock_cycles();
 
 //sclock = current_clock_cycles();
 
-	rmb();
+	//rmb();
+	mb();
 	for(i=0;i<10;i++) {
 		if((result->status & C2H_WB) == C2H_WB){
 			break;
@@ -446,7 +458,8 @@ mclock = current_clock_cycles();
 	}
 
 	xdma_engine_stop(engine);
-	wmb();
+	//wmb();
+	mb();
 // If we get any new packets in between our previous check and stopping engine
 	for(;i<max_num_pkts;i++) {
 		if((result->status & C2H_WB) == C2H_WB) {
@@ -462,7 +475,7 @@ eclock = current_clock_cycles();
 //printf("%d pkts took  p1  : %llu p2 : %llu  cpp : %d circles : %d\n",i,mclock-sclock,eclock-mclock,i == 0 ? 0 : (eclock-mclock)/i,circles);
 	//printf ("rxps: %d\n", i);
 	if(i == 0 ){
-		printf("Dont know how zero packets came when engine->regs->completed_desc_count : %u\n",engine->regs->completed_desc_count);
+		printf("zero packets came when engine->regs->completed_desc_count : %u\n",engine->regs->completed_desc_count);
 	}
 	return i;
 #endif
@@ -500,7 +513,8 @@ int dma_tx(char * pkt, int pkt_len, int pkt_offset)
 
         tx_desc_start = data->tx_queue_dma_addr;
 
-    write_p = (uintptr_t)data->coherent_mem_tx_dma_addr[0] + pkt_offset;
+    //write_p = (uintptr_t)data->coherent_mem_tx_dma_addr[0] + pkt_offset;
+    write_p = pkt + pkt_offset;
     //printf("trace :  func : %s line : %u\n",__func__,__LINE__);
 
     engine = malloc(sizeof(struct xdma_engine));
@@ -550,14 +564,16 @@ int dma_tx(char * pkt, int pkt_len, int pkt_offset)
     w |= (unsigned int)XDMA_CTRL_IE_DESC_ALIGN_MISMATCH;
     w |= (unsigned int)XDMA_CTRL_IE_MAGIC_STOPPED;
     w |= (unsigned int)XDMA_CTRL_POLL_MODE_WB;
-	wmb();
+	//wmb();
+	mb();
     engine->regs->control = w;
     //printf("waiting for tx dma to complete on channel %d\n",channel);
     while (engine->regs->completed_desc_count < (DESC_CNT)) {
 
         if(!connected_to_guest) {
 	    xdma_engine_stop(engine);
-	    wmb();
+	    //wmb();
+	    mb();
             printf("returning from func : %s because of guest disconnection\n",__func__);
 	    free(engine);
             return 0;
@@ -568,7 +584,8 @@ int dma_tx(char * pkt, int pkt_len, int pkt_offset)
     }
     //printf("simple_write() : engine->regs->completed_desc_count = %d\n", engine->regs->completed_desc_count);
     xdma_engine_stop(engine);
-	wmb();
+	//wmb();
+	mb();
     free(engine);
     return 0;
 }
@@ -645,7 +662,8 @@ int dma_tx_burst(uint64_t pkts[64], unsigned int *pkt_len, int pkt_offset, int n
 	w |= (unsigned int)XDMA_CTRL_IE_DESC_ALIGN_MISMATCH;
 	w |= (unsigned int)XDMA_CTRL_IE_MAGIC_STOPPED;
 	w |= (unsigned int)XDMA_CTRL_POLL_MODE_WB;
-	wmb();
+	//wmb();
+	mb();
 	engine->regs->control = w;
 	//printf("control = %x, first_desc_hi = %x, first_desc_lo = %x, first_desc_adjacent = %x\n", engine->regs->control, engine->sgdma_regs->first_desc_hi, engine->sgdma_regs->first_desc_lo, engine->sgdma_regs->first_desc_adjacent);
 	//printf("waiting for tx dma to complete on channel %d\n",channel);
@@ -657,7 +675,8 @@ int dma_tx_burst(uint64_t pkts[64], unsigned int *pkt_len, int pkt_offset, int n
 
 		if(!connected_to_guest) {
 	    		xdma_engine_stop(engine);
-			wmb();
+			//wmb();
+			mb();
 			printf("returning from func : %s because of guest disconnection\n",__func__);
 			return 0;
 		}
@@ -675,7 +694,8 @@ int dma_tx_burst(uint64_t pkts[64], unsigned int *pkt_len, int pkt_offset, int n
 	//printf("simple_write() : engine->regs->completed_desc_count = %d\n", engine->regs->completed_desc_count);
 	//}
 	xdma_engine_stop(engine);
-	wmb();
+	//wmb();
+	mb();
 
 	if(tx_to) {
 		for(i=0;i<20;i++) {

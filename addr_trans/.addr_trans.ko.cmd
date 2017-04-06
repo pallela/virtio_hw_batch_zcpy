@@ -1,0 +1,1 @@
+cmd_/dpdkwork/virtio_hw_zcpy/addr_trans/addr_trans.ko := ld -r -m elf_x86_64 -T ./scripts/module-common.lds --build-id  -o /dpdkwork/virtio_hw_zcpy/addr_trans/addr_trans.ko /dpdkwork/virtio_hw_zcpy/addr_trans/addr_trans.o /dpdkwork/virtio_hw_zcpy/addr_trans/addr_trans.mod.o

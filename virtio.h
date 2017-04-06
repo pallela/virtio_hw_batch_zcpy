@@ -4,7 +4,8 @@
 
 #include<stdint.h>
 #include<errno.h>
-#include<emmintrin.h>
+#include "address_trans_api.h"
+#include<xmmintrin.h>
 
 #define VHOST_USER_VERSION    0x1
 
@@ -203,6 +204,8 @@ struct address_translation
 	volatile uint64_t len;
 	volatile uint64_t offset;
 	int mapfd;
+        struct address_translation_table *table;
+	uint64_t *address_translation_table_offsets;
 };
 
 /* This marks a buffer as continuing via the next field. */
@@ -302,6 +305,8 @@ struct sg_list
 
 #define rmb()   _mm_lfence()
 
+#define mb()  rmb(); wmb();
+
 #define barrier() asm volatile("" ::: "memory")
 
 
@@ -327,29 +332,11 @@ struct sg_list
 
 
 
-#if 0
-#define VHOST_SUPPORTED_FEATURES ((1ULL << VIRTIO_NET_F_MRG_RXBUF) | \
-                                (1ULL << VIRTIO_NET_F_CTRL_VQ) | \
-                                (1ULL << VIRTIO_NET_F_CTRL_RX) | \
-                                (1ULL << VIRTIO_NET_F_GUEST_ANNOUNCE) | \
-                                (VHOST_SUPPORTS_MQ)            | \
-                                (1ULL << VIRTIO_F_VERSION_1)   | \
-                                (1ULL << VHOST_F_LOG_ALL)      | \
-                                (1ULL << VHOST_USER_F_PROTOCOL_FEATURES) | \
-                                (1ULL << VIRTIO_NET_F_HOST_TSO4) | \
-                                (1ULL << VIRTIO_NET_F_HOST_TSO6) | \
-                                (1ULL << VIRTIO_NET_F_CSUM)    | \
-                                (1ULL << VIRTIO_NET_F_GUEST_CSUM) | \
-                                (1ULL << VIRTIO_NET_F_GUEST_TSO4) | \
-                                (1ULL << VIRTIO_NET_F_GUEST_TSO6))
-#endif
-
-
 /* Features supported by this lib. */
 //#define VHOST_SUPPORTED_FEATURES ((1ULL << VIRTIO_NET_F_MRG_RXBUF) | \
 
 
-#define MERGED_RX_HDR_AND_BUFF 1
+#define MERGED_RX_HDR_AND_BUFF 0
 
 #if !MERGED_RX_HDR_AND_BUFF
 #define VHOST_SUPPORTED_FEATURES ((1ULL << VIRTIO_NET_F_CTRL_VQ) | \
@@ -369,6 +356,8 @@ struct sg_list
 
 
 #endif
+
+uint64_t guestphyddr_to_hostphysaddr(uint64_t gpaddr);
 
 #endif
 

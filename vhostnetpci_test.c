@@ -13,6 +13,9 @@
 #include"pcap_rxtx.h"
 #include<semaphore.h>
 #include"dma_rxtx.h"
+#include <fcntl.h>
+
+
 
 //#define SOCKPATH "/usr/local/var/run/openvswitch/vhost-user1"
 #define SOCKPATH "vhost-user1"
@@ -52,7 +55,7 @@ pcap_t *handle;
 uint64_t guestphyddr_to_vhostvadd(uint64_t gpaddr);
 uint64_t qemuvaddr_to_vhostvadd(uint64_t qaddr);
 
-
+static int addrtransfd;
 
 void write_to_file(void *addr, uint64_t mapsize,char *fpath)
 {
@@ -119,6 +122,8 @@ sem_t tx_clean_wait_sem,rx_clean_wait_sem;
 //static unsigned char rx_packet_buff[10*1024];
 //static unsigned char tx_packet_buff[10*1024];
 
+uint64_t *tx_packet_physaddrs;
+uint64_t *rx_packet_physaddrs;
 unsigned char **tx_packet_buff;
 unsigned char **rx_packet_buff;
 
@@ -149,6 +154,7 @@ void * transmit_thread(void *args)
 	int tx_buff_len = 0;
 	int tx_cleanup_required = 0;
 	uint64_t start_clocks,end_clocks;
+	int chunkno = 0;
 
 
 	printf("starting transmit thread \n");
@@ -220,6 +226,7 @@ void * transmit_thread(void *args)
 				//printf("avail desc [%04d] : %04d\n",cur_avail_idx,tx_avail->ring[cur_avail_idx]);
 				//desc_no = tx_avail->ring[cur_avail_idx];
 				tx_buff_len = 0;
+				chunkno = 0;
 
 				while(1) {
 
@@ -227,33 +234,32 @@ void * transmit_thread(void *args)
 
 					//if(tx_desc_base[desc_no].flags & VRING_DESC_F_NEXT) {
 					if(temp_desc.flags & VRING_DESC_F_NEXT) {
-						packet_addr = (unsigned char *) guestphyddr_to_vhostvadd(tx_desc_base[desc_no].addr);
+						chunkno++;
 						packet_len = tx_desc_base[desc_no].len;
-						//printf("(next flag) desc no : %d len : %d\n",desc_no,packet_len);
-						//print_hex(packet_addr,packet_len);
-						//desc_no = (desc_no + 1)%tx_desc_count;
 						desc_no = tx_desc_base[desc_no].next;
-						memcpy(tx_packet_buff[j] + tx_buff_len,packet_addr,packet_len);
 						tx_buff_len += packet_len;
 					}
 					else {
-						packet_addr = (unsigned char *) guestphyddr_to_vhostvadd(tx_desc_base[desc_no].addr);
+						chunkno++;
+						packet_addr = (unsigned char *) guestphyddr_to_hostphysaddr(tx_desc_base[desc_no].addr);
 						packet_len = tx_desc_base[desc_no].len;
-						//printf("desc no : %d len : %d\n",desc_no,packet_len);
 						rmb();
-						packet_hdr = (struct virtio_net_hdr_mrg_rxbuf*) packet_addr;
 
-						memcpy(tx_packet_buff[j] + tx_buff_len,packet_addr,packet_len);
 						tx_buff_len += packet_len;
-						tx_buff_len -= vhost_hlen;
-						tx_packet_len[j] = tx_buff_len;
-						//print_hex(tx_packet_buff,tx_buff_len);
-						//pcap_tx(handle,tx_packet_buff+vhost_hlen,tx_buff_len-vhost_hlen);
+
+						if(chunkno == 1) {
+							tx_packet_physaddrs[j] = (uintptr_t)packet_addr + vhost_hlen;
+							tx_packet_len[j] = tx_buff_len - vhost_hlen;
+						}
+						else {
+							tx_packet_physaddrs[j] = (uintptr_t) packet_addr;
+							tx_packet_len[j] = tx_buff_len - vhost_hlen;
+						}
+
 						#if !TX_BURST
-						//dma_tx(tx_packet_buff,tx_buff_len-vhost_hlen,vhost_hlen);
-						dma_tx(tx_packet_buff[j],tx_buff_len-vhost_hlen,vhost_hlen);
+						dma_tx(tx_packet_physaddrs[j],tx_packet_len[j],0);
 						#endif
-						TXB +=  tx_buff_len-vhost_hlen;
+						TXB += tx_packet_len[j];
 						//printf("total sent bytes : %d\n",TXB);
 
 						break;
@@ -289,7 +295,8 @@ void * transmit_thread(void *args)
 			//start_clocks = current_clock_cycles();
 				if(j > 0) {
 					//pcap_tx_burst(handle,tx_packet_buff,tx_packet_len,j);
-					dma_tx_burst(coherent_tx_hw_addresses,tx_packet_len,vhost_hlen,j);
+					//dma_tx_burst(coherent_tx_hw_addresses,tx_packet_len,vhost_hlen,j);
+					dma_tx_burst(tx_packet_physaddrs,tx_packet_len,0,j);
 					/*dma_tx(NULL,tx_packet_len[0],vhost_hlen);*/
 
 				}
@@ -379,6 +386,46 @@ void * transmit_thread(void *args)
 unsigned char memory_table[100*1024];
 pthread_t tx_thread;
 pthread_t rx_thread;
+
+
+uint64_t guestphyddr_to_hostphysaddr(uint64_t gpaddr)
+{
+        int i,j,pcnt;
+        int64_t offset,local_offset,found = 0; 
+        uint64_t ret = 0;     
+
+        for(i=0;i<translation_table_count;i++) {
+
+                if(gpaddr >= translation_table[i].guestphyaddr && gpaddr <=  translation_table[i].guestphyaddr + translation_table[i].len){
+                        offset = (gpaddr - translation_table[i].guestphyaddr);
+                        //printf("found gpaddr : %llx in table entry : %d offset : %llx\n",
+                        //              (unsigned long long int)gpaddr,i,(unsigned long long int)offset);
+                        offset += translation_table[i].offset;
+                        //printf("translated address : %llx\n",(unsigned long long int) ret);
+                        pcnt = translation_table[i].table->nr_entries;
+                        found = 1;                     
+                        break;
+
+                }
+        }
+
+        if(found) {
+                for(j=0;j<pcnt;j++) {          
+                        if(offset > translation_table[i].table->table[j].len) {
+                                offset -= translation_table[i].table->table[j].len;
+                        }     
+                        else {
+                                //printf("found at entry : %d phys entry : %d start addr : %llx offset : %llx\n",i,j,translation_table[i].table->table[j].physaddr,offset);
+                                ret = translation_table[i].table->table[j].physaddr + offset;
+                                break;
+                        }
+                }
+        }
+
+        //printf("paddr : %llx\n",ret);
+        return ret;
+
+}
 
 
 uint64_t guestphyddr_to_vhostvadd(uint64_t gpaddr)
@@ -578,8 +625,18 @@ main(int argc, char **argv)
 	char SOCKPATH_NEW[100];
 	char channel_str[10];
 
+        addrtransfd = open("/sys/kernel/debug/userpagesexample",O_RDWR);
+
+        if(addrtransfd < 0) {
+                perror("Open call failed\n");
+                return -1;
+        }
+
+
 	coherent_tx_hw_addresses = malloc(64*sizeof(uint64_t));;
 	coherent_rx_hw_addresses = malloc(64*sizeof(uint64_t));;
+	tx_packet_physaddrs = malloc(64*sizeof(uint64_t));;
+	rx_packet_physaddrs = malloc(64*sizeof(uint64_t));;
 
 	tx_packet_buff = malloc(64*sizeof(char *));
 	rx_packet_buff = malloc(64*sizeof(char *));
@@ -888,6 +945,11 @@ main(int argc, char **argv)
 						translation_table[i].len = mapsize;
 						translation_table[i].offset = table->regions[i].mmap_offset;
 						translation_table[i].mapfd = msg->fds[i];
+						translation_table[i].table = get_physaddr_translation(\
+								(void *)translation_table[i].vhostuservirtaddr,
+								translation_table[i].len,
+								addrtransfd);
+
 
 						//write_to_file(addr,mapsize,"/tmp/image.dat");
 					}
